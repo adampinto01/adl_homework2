@@ -46,7 +46,9 @@ class Tokenizer(abc.ABC):
 class BSQ(torch.nn.Module):
     def __init__(self, codebook_bits: int, embedding_dim: int):
         super().__init__()
-        raise NotImplementedError()
+        self._codebook_bits = codebook_bits
+        self.down = torch.nn.Linear(embedding_dim, codebook_bits, bias=False)
+        self.up = torch.nn.Linear(codebook_bits, embedding_dim, bias=False)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -55,14 +57,15 @@ class BSQ(torch.nn.Module):
         - L2 normalization
         - differentiable sign
         """
-        raise NotImplementedError()
+        z = torch.nn.functional.normalize(self.down(x), dim=-1)
+        return diff_sign(z)
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         """
         Implement the BSQ decoder:
         - A linear up-projection into embedding_dim should suffice
         """
-        raise NotImplementedError()
+        return self.up(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decode(self.encode(x))
@@ -96,35 +99,30 @@ class BSQPatchAutoEncoder(PatchAutoEncoder, Tokenizer):
     """
 
     def __init__(self, patch_size: int = 5, latent_dim: int = 128, codebook_bits: int = 10):
-        super().__init__(patch_size=patch_size, latent_dim=latent_dim)
-        raise NotImplementedError()
+        super().__init__(patch_size=patch_size, latent_dim=latent_dim, bottleneck=latent_dim)
+        self.codebook_bits = codebook_bits
+        self.bsq = BSQ(codebook_bits=codebook_bits, embedding_dim=latent_dim)
 
     def encode_index(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError()
+        return self.bsq._code_to_index(self.encode(x))
 
     def decode_index(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError()
+        return self.decode(self.bsq._index_to_code(x))
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError()
+        return self.bsq.encode(super().encode(x))
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError()
+        return super().decode(self.bsq.decode(x))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
-        Return the reconstructed image and a dictionary of additional loss terms you would like to
-        minimize (or even just visualize).
-        Hint: It can be helpful to monitor the codebook usage with
-
-              cnt = torch.bincount(self.encode_index(x).flatten(), minlength=2**self.codebook_bits)
-
-              and returning
-
-              {
-                "cb0": (cnt == 0).float().mean().detach(),
-                "cb2": (cnt <= 2).float().mean().detach(),
-                ...
-              }
+        Return the reconstructed image and codebook usage statistics (fraction of codes that are
+        never used / used at most twice in this batch).
         """
-        raise NotImplementedError()
+        code = self.encode(x)
+        cnt = torch.bincount(self.bsq._code_to_index(code).flatten(), minlength=2**self.codebook_bits)
+        return self.decode(code), {
+            "cb0": (cnt == 0).float().mean().detach(),
+            "cb2": (cnt <= 2).float().mean().detach(),
+        }
