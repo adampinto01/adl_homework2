@@ -53,12 +53,53 @@ class AutoregressiveModel(torch.nn.Module, Autoregressive):
     Hint: You can complete this homework without using positional embeddings
     """
 
-    def __init__(self, d_latent: int = 128, n_tokens: int = 2**10):
+    def __init__(self, d_latent: int = 128, n_tokens: int = 2**10, n_layers: int = 4, max_len: int = 1024):
         super().__init__()
-        raise NotImplementedError()
+        self.n_tokens = n_tokens
+        self.embedding = torch.nn.Embedding(n_tokens, d_latent)
+        self.pos_embedding = torch.nn.Parameter(torch.zeros(1, max_len, d_latent))
+        torch.nn.init.normal_(self.pos_embedding, std=0.02)
+        layer = torch.nn.TransformerEncoderLayer(
+            d_model=d_latent,
+            nhead=8,
+            dim_feedforward=4 * d_latent,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = torch.nn.TransformerEncoder(layer, num_layers=n_layers, enable_nested_tensor=False)
+        self.norm = torch.nn.LayerNorm(d_latent)
+        self.head = torch.nn.Linear(d_latent, n_tokens)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        raise NotImplementedError()
+        """
+        x: (B, h, w) integer tokens
+        return: logits (B, h, w, n_tokens) over the next token (apply softmax for probabilities;
+                use cross_entropy on the logits for training), and an empty dict of extra terms.
+        """
+        B, h, w = x.shape
+        L = h * w
+        z = self.embedding(x.reshape(B, L).long())
+        # shift right by one: position i sees only tokens < i, position 0 sees a zero vector
+        z = torch.cat([torch.zeros_like(z[:, :1]), z[:, :-1]], dim=1)
+        z = z + self.pos_embedding[:, :L]
+        mask = torch.nn.Transformer.generate_square_subsequent_mask(L, device=x.device)
+        z = self.transformer(z, mask=mask, is_causal=True)
+        logits = self.head(self.norm(z))
+        return logits.reshape(B, h, w, self.n_tokens), {}
 
+    @torch.no_grad()
     def generate(self, B: int = 1, h: int = 30, w: int = 20, device=None) -> torch.Tensor:  # noqa
-        raise NotImplementedError()
+        """
+        Sample B token images of shape (B, h, w), one token at a time in raster order.
+        """
+        if device is None:
+            device = next(self.parameters()).device
+        L = h * w
+        tokens = torch.zeros(B, L, dtype=torch.long, device=device)
+        for i in range(L):
+            logits, _ = self.forward(tokens.reshape(B, h, w))
+            probs = torch.softmax(logits.reshape(B, L, -1)[:, i], dim=-1)
+            tokens[:, i] = torch.multinomial(probs, 1).squeeze(-1)
+        return tokens.reshape(B, h, w)
